@@ -23,7 +23,7 @@ public class Net {
 
     private static Map<String, Call> processors;
 
-    public static final String UPLOAD_URL = "http://10.100.30.12:8080/assist-dock/api/visit/attachment/breakpoint-renewal.do";
+    public static final String UPLOAD_URL = "http://10.100.30.12:8080/assist-dock/breakpoint-renewal.do";
 
     public static void init(){
         processors = new HashMap<>();
