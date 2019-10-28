@@ -23,6 +23,397 @@ Uploader类中有addTask方法 可以在Activity中绑定service后直接调用s
 
 将Net.java 里面的 UPLOAD_URL 地址换成自己服务端的地址，服务端地址代码参考server目录下的类文件以及说明
 
+``` java
+public class AttachUploadService extends Service {
+
+    public static final String ACTION_START_SERVICE = "io.github.ryanhoo.upload.ACTION.START_UPLOAD";
+    public static final String ACTION_STOP_SERVICE = "io.github.ryanhoo.upload.ACTION.STOP_SERVICE";
+
+    public class LocalBinder extends Binder {
+        public AttachUploadService getService(){
+            return AttachUploadService.this;
+        }
+    }
+
+    private final IBinder binder = new LocalBinder();
+
+    private Uploader uploader;
+
+    private Disposable disposable;
+
+    private boolean networkAvailable;
+
+    private class NetworkConnectChangedReceiver extends BroadcastReceiver{
+        @Override
+        public void onReceive(Context context, Intent intent) {
+
+            //检测API是不是小于23，因为到了API23之后getNetworkInfo(int networkType)方法被弃用
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP) {
+
+                //获得ConnectivityManager对象
+                ConnectivityManager connMgr = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+
+                //获取ConnectivityManager对象对应的NetworkInfo对象
+                //获取WIFI连接的信息
+                NetworkInfo wifiNetworkInfo = connMgr.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
+                //获取移动数据连接的信息
+                NetworkInfo dataNetworkInfo = connMgr.getNetworkInfo(ConnectivityManager.TYPE_MOBILE);
+                if (wifiNetworkInfo.isConnected() && dataNetworkInfo.isConnected()) {
+                    //Toast.makeText(context, "WIFI已连接,移动数据已连接", Toast.LENGTH_SHORT).show();
+                    networkAvailable = true;
+                } else if (wifiNetworkInfo.isConnected() && !dataNetworkInfo.isConnected()) {
+                    //Toast.makeText(context, "WIFI已连接,移动数据已断开", Toast.LENGTH_SHORT).show();
+                    networkAvailable = true;
+                } else if (!wifiNetworkInfo.isConnected() && dataNetworkInfo.isConnected()) {
+                    //Toast.makeText(context, "WIFI已断开,移动数据已连接", Toast.LENGTH_SHORT).show();
+                    networkAvailable = true;
+                } else {
+                    //Toast.makeText(context, "网络已断开，已暂停上传", Toast.LENGTH_SHORT).show();
+                    networkAvailable = false;
+                }
+                //API大于23时使用下面的方式进行网络监听
+            }else {
+                //获得ConnectivityManager对象
+                ConnectivityManager connMgr = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+
+                //获取所有网络连接的信息
+                Network[] networks = connMgr.getAllNetworks();
+
+                boolean connected = false;
+                //通过循环将网络信息逐个取出来
+                for (int i=0; i < networks.length; i++){
+                    //获取ConnectivityManager对象对应的NetworkInfo对象
+                    NetworkInfo info = connMgr.getNetworkInfo(networks[i]);
+                    if(info.isConnected()){
+                        connected = true;
+                        break;
+                    }
+                }
+                networkAvailable = connected;
+            }
+        }
+    }
+
+    private NetworkConnectChangedReceiver netWorkStateReceiver;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+
+        uploader = new Uploader();
+
+        networkAvailable = true;
+
+        if (netWorkStateReceiver == null) {
+            netWorkStateReceiver = new NetworkConnectChangedReceiver();
+        }
+        IntentFilter filter = new IntentFilter();
+        filter.addAction("android.net.conn.CONNECTIVITY_CHANGE");
+        filter.addAction("android.net.wifi.WIFI_STATE_CHANGED");
+        filter.addAction("android.net.wifi.STATE_CHANGE");
+        registerReceiver(netWorkStateReceiver, filter);
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+
+        unregisterReceiver(netWorkStateReceiver);
+
+        if(disposable != null && !disposable.isDisposed()) {
+            disposable.dispose();
+        }
+        this.uploader.destroy();
+
+        this.netWorkStateReceiver =  null;
+        this.disposable = null;
+        this.uploader = null;
+    }
+
+    public Uploader getUploader(){
+        return uploader;
+    }
+
+    //手动从界面上选择的文件, 肯定不能上传完了就删除
+    public void addAll(List<UploadEntity> ues, Map<String, String> params){
+
+        if(ues != null && ues.size() > 0) {
+            for (UploadEntity ue : ues) {
+                uploader.addTask(ue.getFilePath(), params, false);
+            }
+
+            showNotification();
+        }
+    }
+
+    public void addTask(String file, Map<String,String> params){
+        uploader.addTask(file, params, false);
+        showNotification();
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+
+        //准备支持网络断开暂停 、 恢复上传等操作
+        if (intent != null){
+            String action = intent.getAction();
+
+            if(ACTION_START_SERVICE.equals(action)) {
+
+                startUpload();
+
+		//用户自行取舍参数， 不用的参数或者报错的参数，自行删除
+                String biz = intent.getStringExtra("biz");
+                String bizId = intent.getStringExtra("bizId");
+                String others = intent.getStringExtra("others");
+                String oauth_token = intent.getStringExtra("oauth_token");
+                String oauth_token_secret = intent.getStringExtra("oauth_token_secret");
+                String file = intent.getStringExtra("file");
+                boolean autoDelete = StringUtils.isNotBlank(intent.getStringExtra("autoDelete"));
+
+                String[] files = intent.getStringArrayExtra("files");
+
+                if(bizId != null && oauth_token != null && oauth_token_secret != null){
+                    Map<String, String> params = new HashMap<>();
+		    //多种附加参数、自定义参数等
+                    params.put("biz", biz+"");
+                    params.put("bizId", bizId+"");
+                    params.put("others", others+"");
+                    params.put("oauth_token", oauth_token);
+                    params.put("oauth_token_secret", oauth_token_secret);
+
+                    if(file != null) {
+                        uploader.addTask(file, params, autoDelete);
+                    }
+                    if(files != null){
+                        for(String f : files){
+                            Log.d(getClass().getName(), f);
+                            uploader.addTask(f, params, autoDelete);
+                        }
+                    }
+                }
+
+            }else if(ACTION_STOP_SERVICE.equals(action)){
+
+                pauseUpload();
+            }
+        }
+
+        return START_NOT_STICKY;
+    }
+
+    private void pauseUpload(){
+        if(disposable != null && !disposable.isDisposed()){
+            disposable.dispose();
+        }
+    }
+
+    public void startUpload(){
+        //正在运行
+        if(disposable != null && !disposable.isDisposed()){
+            return;
+        }
+
+        showNotification();
+	
+	//这里引用的Rxjava, 配置gradle中引入
+	//    implementation "io.reactivex.rxjava2:rxjava:2.2.8"
+    	//    implementation 'io.reactivex.rxjava2:rxandroid:2.1.1'
+        disposable = Observable.interval(500, 500, TimeUnit.MILLISECONDS)//设置0延迟，每隔一秒发送一块数据
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribeOn(Schedulers.newThread())
+                .subscribe(new Consumer<Long>() {
+                    @Override
+                    public void accept(@NonNull Long value) throws Exception {
+
+                        if(uploader.getProgress() >= 100 || uploader.getFileCount() == 0){
+                            uploader.clear();
+                            stopForeground(true);
+                            disposable.dispose();
+                            return;
+                        }
+
+                        showNotification();
+
+                        if(networkAvailable==false){
+                            return;
+                        }
+
+                        if(!uploader.isProcessing()) {
+                            uploader.triggerNextBlock();
+                        }
+                    }
+                });
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+
+        //没有任务的时候，内存紧张，停止服务
+        if(uploader.getFileCount() == 0){
+            stopSelf();
+        }
+    }
+
+    public void showNotification() {
+	/**
+        Notification notification = null; //用户自己初始化 通知对象 并开始显示
+
+        startForeground(Constants.notificationUploadId, notification);
+	**/
+    }
+
+    private RemoteViews mContentViewSmall;
+
+    private RemoteViews getSmallContentView() {
+        if (mContentViewSmall == null) {
+            mContentViewSmall = new RemoteViews(getPackageName(), R.layout.notification_upload_small);
+            setUpRemoteView(mContentViewSmall);
+        }
+        updateRemoteViews(mContentViewSmall);
+        return mContentViewSmall;
+    }
+
+
+    private void setUpRemoteView(RemoteViews remoteView) {
+       	//初始化通知栏
+    }
+
+    private void updateRemoteViews(RemoteViews remoteView) {
+	//通知栏状态变更代码
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return binder;
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        return super.onUnbind(intent);
+    }
+}
+```
+
+Hbuilder HBuilderX 内JS 调用：
+``` js
+document.getElementById('btn-start-record').addEventListener('tap', function() {
+	var main = plus.android.runtimeMainActivity();
+	var Intent = plus.android.importClass('android.content.Intent');
+	var intent = new Intent();
+	intent.setClassName(main, "com.xxx.service.AttachUploadService");	//xxx自行替换包名
+	intent.setAction('io.github.ryanhoo.upload.ACTION.START_UPLOAD');
+	intent.putExtra('biz', 'visit-attach');
+	intent.putExtra('bizId', self.visId + "");
+	var files = [];
+	files.push("/mnt/filepath/file.name");	//自行添加文件
+	intent.putExtra('files', files);
+	var name = caseVue.adr && caseVue.adr.adrName ? caseVue.adr.adrName : '未知';
+	intent.putExtra('visName', name);
+	intent.putExtra('oauth_token', localStorage.getItem('oauthToken'));
+	intent.putExtra('oauth_token_secret', localStorage.getItem('oauthTokenSecret'));
+	main.startService(intent);
+});
+```
+
+Java调用 有两种调用方法，一种是在Activity中直接绑定Service,然后调用Service中的方法，一种就是直接在startService的时候传递
+### 直接调用使用
+``` java
+public class UploadQueueActivity extends AppCompatActivity implements View.OnClickListener {
+
+    //private UploadQueueAdapter adapter;
+
+    private Map<String, String> params;
+
+    private AttachUploadService upService;
+
+    private ServiceConnection conn = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder binder) {
+
+            AttachUploadService.LocalBinder myBinder = (AttachUploadService.LocalBinder)binder;
+            upService = myBinder.getService();
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            upService = null;
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_multi_upload);
+
+        //adapter = new UploadQueueAdapter();
+
+        //findViewById(R.id.btn_select_file).setOnClickListener(this);
+        //findViewById(R.id.btn_do_upload).setOnClickListener(this);
+
+        Bundle exts = getIntent().getExtras();
+
+        params = new HashMap<>();
+        if(exts != null) {
+            params.put("biz", exts.getString("biz")+"");
+            params.put("bizId", exts.getString("bizId")+"");
+            params.put("others", exts.getString("others")+"");
+            params.put("oauth_token", exts.getString("oauth_token")+"");
+            params.put("oauth_token_secret", exts.getString("oauth_token_secret")+"");
+        }
+
+        //if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O){
+        //    startForegroundService(new Intent(this, AttachUploadService.class));
+        //}else{
+            startService(new Intent(this, AttachUploadService.class));
+        //}
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        //绑定Service
+        bindService(new Intent(this, AttachUploadService.class), conn, Context.BIND_AUTO_CREATE);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        //取消绑定Service
+        unbindService(conn);
+    }
+
+    @Override
+    public void onClick(View v) {
+        switch (v.getId()){
+            case R.id.btn_select_file:
+                //this.openSelector2(); 自行定义选择文件的操作
+                break;
+            case R.id.btn_do_upload:
+                upService.addAll(adapter.getData(), this.params);
+                //adapter.clear();
+                upService.startUpload();
+                finish();
+                break;
+        }
+    }
+}
+```
+### 不绑定Service使用
+``` java
+Intent intent = new Intent(this, AttachUploadService.class);
+intent.putExtra("biz", "sssss");
+intent.putExtra("bizId", "sssss");
+
+String[] files = {"/filea.jpg", "fileb.jpg"};
+intent.putExtra("files", files);
+///.....
+startService(intent);
+```
+
+
 ### 扩展使用
 ------------------------------
 此代码的实现原理即可以用来上传，稍作改造后也可以变成断点下载，改造代码很小
